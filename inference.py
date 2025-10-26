@@ -134,19 +134,21 @@ class BudgetPredictor:
             self.best_models[category] = dummy
             self.best_model_types[category] = "dummy"
 
-    def _prepare_features(self, income: float, family_size: int, vehicles: int) -> np.ndarray:
-        """Prepare input features for prediction"""
-        # Create feature DataFrame
+    def _prepare_features(self, income: float, family_size: int, vehicles: int) -> Tuple[np.ndarray, pd.DataFrame]:
+        """Prepare input features for prediction (matching notebook logic)"""
+        # Create feature DataFrame with proper structure (matching notebook)
         features = pd.DataFrame({
             'total_income': [income],
             'family_size': [family_size],
-            'total_vehicles': [vehicles],
-            'income_per_capita': [income / family_size],
-            'vehicles_per_capita': [vehicles / family_size],
-            'region_encoded': [0]  # Default value
+            'total_vehicles': [vehicles]
         })
 
-        # Ensure correct feature order
+        # Calculate derived features
+        features['income_per_capita'] = features['total_income'] / features['family_size']
+        features['vehicles_per_capita'] = features['total_vehicles'] / features['family_size']
+        features['region_encoded'] = [0]  # Default value
+
+        # Define the feature order and keep it consistent (matching notebook)
         feature_order = [
             'total_income',
             'family_size',
@@ -156,6 +158,11 @@ class BudgetPredictor:
             'region_encoded'
         ]
 
+        # Ensure all columns exist and reorder
+        for col in feature_order:
+            if col not in features.columns:
+                features[col] = 0  # Default value if missing
+
         features = features[feature_order]
 
         # Apply scaling if available
@@ -164,17 +171,18 @@ class BudgetPredictor:
         else:
             features_scaled = features.values
 
-        return features_scaled, features.values
+        return features_scaled, features
 
     def _predict_category(self, category: str, features_scaled: np.ndarray,
-                         features_raw: np.ndarray, model_type: ModelType) -> float:
-        """Predict expenditure for a single category"""
+                         features_df: pd.DataFrame, model_type: ModelType) -> float:
+        """Predict expenditure for a single category (matching notebook logic)"""
         if category not in self.best_models:
             return 0.0
 
         model = self.best_models[category]
 
         try:
+            actual_model_type = "xgboost"
             # Determine which model to use
             if model_type == ModelType.best:
                 # Use the best model type determined during training
@@ -186,7 +194,7 @@ class BudgetPredictor:
             else:
                 actual_model_type = "xgboost"
 
-            # Make prediction based on model type
+            # Make prediction based on model type (matching notebook logic)
             if actual_model_type == "xgboost":
                 # XGBoost model prediction
                 pred = model.predict(features_scaled)[0]
@@ -215,64 +223,78 @@ class BudgetPredictor:
             print(f"Error predicting {category}: {str(e)}")
             return 0.0
 
+    def get_model_info(self) -> Dict[str, Any]:
+        """Get information about loaded models"""
+        info = {
+            "categories": self.all_categories,
+            "feature_names": self.feature_names or ["total_income", "family_size", "total_vehicles",
+                                                   "income_per_capita", "vehicles_per_capita", "region_encoded"],
+            "model_types": self.best_model_types,
+            "models_loaded": len(self.best_models) > 0,
+            "primer_categories": [cat.replace('_expenditure', '').replace('_', ' ').title()
+                                 for cat in self.primer],
+            "sekunder_categories": [cat.replace('_expenditure', '').replace('_', ' ').title()
+                                   for cat in self.sekunder],
+            "tersier_categories": [cat.replace('_expenditure', '').replace('_', ' ').title()
+                                  for cat in self.tersier]
+        }
+        return info
+
     def predict_budget(self, request: BudgetRequest) -> List[MonthlyPrediction]:
-        """Generate budget predictions for given parameters"""
+        """Generate budget predictions for given parameters (matching notebook logic exactly)"""
         # Prepare features
-        features_scaled, features_raw = self._prepare_features(
+        features_scaled, features_df = self._prepare_features(
             request.income, request.family_size, request.vehicles
         )
 
-        # Set start month
+        # Set start month (always use 1st day to avoid month-end issues)
         if request.start_month:
             start_date = datetime.strptime(request.start_month + '-01', '%Y-%m-%d')
         else:
             start_date = datetime.now()
 
-        # Determine inflation rate
+        # Determine inflation rate (matching notebook logic)
         inflation_rate = 0.21  # Default monthly inflation rate
-        if request.use_inflation and os.path.exists("../bps_inflation_data.csv"):
+        if request.use_inflation and os.path.exists("bps_inflation_data.csv"):
             try:
-                inflation_data = pd.read_csv("../bps_inflation_data.csv")
+                inflation_data = pd.read_csv("bps_inflation_data.csv")
                 if 'inflation_mom' in inflation_data.columns:
                     inflation_rate = inflation_data['inflation_mom'].mean()
             except:
                 pass
 
-        # Generate monthly predictions
+        # Generate monthly predictions for FUTURE months only
         predictions = []
 
-        for month_offset in range(request.months_ahead):
-            # Calculate month date
-            current_date = start_date + timedelta(days=month_offset * 30)
+        # FIXED: Start from 1 to predict FUTURE months only (matching notebook)
+        # If months_ahead=2 and current month is October, it will predict November and December
+        for month_offset in range(1, request.months_ahead + 1):
+            # FIXED: Calculate month date properly using pandas DateOffset
+            # This ensures correct month progression without duplicates or skips
+            current_date = pd.to_datetime(start_date) + pd.DateOffset(months=month_offset)
             month_label = current_date.strftime('%Y-%m')
             month_name = current_date.strftime('%B %Y')
 
             # Calculate cumulative inflation
-            if month_offset > 0:
-                cumulative_inflation = ((1 + inflation_rate/100) ** month_offset - 1) * 100
-                inflation_factor = (1 + inflation_rate/100) ** month_offset
-            else:
-                cumulative_inflation = 0
-                inflation_factor = 1.0
+            cumulative_inflation = ((1 + inflation_rate/100) ** month_offset - 1) * 100
+            inflation_factor = (1 + inflation_rate/100) ** month_offset
 
             # Predict base amounts for each category
             category_predictions = {}
             for category in self.all_categories:
                 pred = self._predict_category(
-                    category, features_scaled, features_raw, request.model_type
+                    category, features_scaled, features_df, request.model_type
                 )
-                # Apply inflation if needed
-                if request.use_inflation and month_offset > 0:
-                    pred *= inflation_factor
+                # Apply cumulative inflation
+                pred *= inflation_factor
                 category_predictions[category] = pred
-
-            # Calculate totals
+            # Calculate totals (matching notebook logic)
             total_primer = sum(category_predictions[cat] for cat in self.primer)
             total_sekunder = sum(category_predictions[cat] for cat in self.sekunder)
             total_tersier = sum(category_predictions[cat] for cat in self.tersier)
             total_expense = total_primer + total_sekunder + total_tersier
 
-            # Calculate percentages
+            # Calculate percentages (matching notebook logic)
             if total_expense > 0:
                 primer_pct = (total_primer / total_expense) * 100
                 sekunder_pct = (total_sekunder / total_expense) * 100
@@ -337,29 +359,12 @@ class BudgetPredictor:
                 savings_percentage=savings_pct,
                 breakdown=breakdown,
                 cumulative_inflation_pct=cumulative_inflation,
-                inflation_adjusted=(month_offset > 0 and request.use_inflation)
+                inflation_adjusted=True  # Always True for future months
             )
 
             predictions.append(prediction)
 
         return predictions
-
-    def get_model_info(self) -> Dict[str, Any]:
-        """Get information about loaded models"""
-        info = {
-            "categories": self.all_categories,
-            "feature_names": self.feature_names or ["total_income", "family_size", "total_vehicles",
-                                                   "income_per_capita", "vehicles_per_capita", "region_encoded"],
-            "model_types": self.best_model_types,
-            "models_loaded": len(self.best_models) > 0,
-            "primer_categories": [cat.replace('_expenditure', '').replace('_', ' ').title()
-                                 for cat in self.primer],
-            "sekunder_categories": [cat.replace('_expenditure', '').replace('_', ' ').title()
-                                   for cat in self.sekunder],
-            "tersier_categories": [cat.replace('_expenditure', '').replace('_', ' ').title()
-                                  for cat in self.tersier]
-        }
-        return info
 
 # Global predictor instance
 predictor = BudgetPredictor()
