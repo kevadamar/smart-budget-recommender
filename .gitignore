@@ -40,7 +40,6 @@ profile_default/
 ipython_config.py
 
 # Data files
-*.csv
 *.xlsx
 *.xls
 *.db
@@ -71,6 +70,7 @@ ehthumbs_vista.db
 .settings/
 
 # Model files
+models/*
 *.pkl
 *.pickle
 *.h5
@@ -78,6 +78,7 @@ ehthumbs_vista.db
 *.ckpt
 *.pth
 *.pt
+*.keras
 
 # Logs
 *.log
